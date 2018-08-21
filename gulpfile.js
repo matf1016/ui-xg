@@ -15,6 +15,11 @@ var gulp = require('gulp'),
     renderer = new marked.Renderer(),
     highlight = require('highlight.js'),
     conventionalChangelog = require('gulp-conventional-changelog'),
+    webpackConfig = require('./misc/dev-server/webpack.dev.conf.js'),
+    express = require('express'),
+    gulpWatch = require('gulp-watch'),
+    HtmlWebpackPlugin = require('html-webpack-plugin'),
+    webpack = require('webpack'),
     ejs = require('ejs');
 
 var config = {
@@ -139,6 +144,7 @@ function findModule(name) {
         moduleName: enquote(config.moduleName + '.' + name),
         srcFiles: _.matchFile(config.src + '/' + name + '/*.js'),
         cssFiles: _.matchFile(config.src + '/' + name + '/*.css'),
+        scssFiles: _.matchFile(config.src + '/' + name + '/*.scss'),
         tplFiles: _.matchFile(config.src + '/' + name + '/templates/*.html'),
         tpljsFiles: _.matchFile(config.src + '/' + name + '/templates/*.html.js'),
         tplModules: _.matchFile(config.src + '/' + name + '/templates/*.html').map(getTplModule),
@@ -276,10 +282,17 @@ gulp.task('modules', function () {
 /**
  * 拼接js和css
  */
+// 样式重新组织
+// gulp.task('sass', function () {
+//     return gulp.src([config.src + '/index.scss'])
+//         .pipe(sass().on('error', sass.logError))
+//         .pipe(gulp.dest('./' + config.dist + '/css/'));
+// });
 gulp.task('sass', function () {
-    return gulp.src(config.src + '/*/*.scss')
+    return gulp.src(config.src + '/index.scss')
         .pipe(sass().on('error', sass.logError))
-        .pipe(gulp.dest(config.src));
+        .pipe(rename({basename: config.filename}))
+        .pipe(gulp.dest('./' + config.dist + '/css/'));
 });
 gulp.task('concat:css', function () {
     var src = config.modules.map(function (module) {
@@ -503,7 +516,6 @@ function createPartial(module, docPath) {
     var jsCode = highlight.highlightAuto(js).value;
     var cssCode = highlight.highlightAuto(css).value;
 
-
     data.html = htmlCode || '';
     data.js = jsCode || '';
     data.css = cssCode || '';
@@ -535,6 +547,88 @@ gulp.task('changelog', function () {
         }))
         .pipe(gulp.dest('./'));
 });
+// 本地开发server
+gulp.task('webpack', function () {
+    var args = process.argv.slice(3);
+    var module = args.map(function (argv) {
+        return argv.slice(1);
+    })[0];
+    var hasBs = args.indexOf('--bs') !== -1;
+    if (!module) {
+        return;
+    }
+    var addRelativePath = function (path) {
+        return './' + path;
+    };
+    var deps = [module].concat(dependenciesForModule(module, {}));
+    var entry = {
+        'angular.js': './bower_components/angular/angular.min.js',
+        'index.scss': './src/index.scss',
+        'bootstrap.glyphicons.css': './lib/bootstrap-glyphicons/css/bootstrap.css'
+    };
+    // 如果需要bootstrap，则引入资源
+    if (hasBs) {
+        entry['bootstrap.css'] = './node_modules/bootstrap/dist/css/bootstrap.min.css';
+    }
+    var thisMod = config.modules.find(function (mod) {
+        return mod.name === module;
+    });
+    var depModules = config.modules.filter(function (mod) {
+        return deps.indexOf(mod.name) !== -1;
+    });
+    var depModulesList = [];
+    depModules.forEach(function (mod) {
+        entry[mod.name] = [].concat(mod.srcFiles.map(addRelativePath), mod.tpljsFiles.map(addRelativePath));
+        depModulesList = depModulesList.concat(mod.moduleName, mod.tplModules);
+    });
+    var jsContent = 'var app = angular.module("uixDemo",[' + depModulesList + ']);\n';
+    jsContent += thisMod.docs.js;
+    var htmlContent = thisMod.docs.html;
+    var cssContent = thisMod.docs.css;
+    webpackConfig.entry = entry;
+    webpackConfig.plugins.push(new HtmlWebpackPlugin({
+        opts: {
+            jsContent: jsContent,
+            htmlContent: htmlContent,
+            cssContent: cssContent
+        },
+        template: 'misc/dev-server/dev-template.html',
+        inject: 'head'
+    }));
+    var app = express();
+    var compiler = webpack(webpackConfig);
+
+    var devMiddleware = require('webpack-dev-middleware')(compiler, {
+        publicPath: webpackConfig.output.publicPath,
+        quiet: true
+    });
+
+    app.use(devMiddleware);
+
+    var uri = 'http://localhost:8000';
+
+    devMiddleware.waitUntilValid(function () {
+        _.log('> Listening at ' + uri + '\n');
+    });
+
+    // 监听模板文件变动
+    gulpWatch(config.src + '/' + module + '/templates/*.html', function () {
+        runSequence('html2js');
+    });
+    app.listen(8000, function (err) {
+        if (err) {
+            return _.log(err);
+        }
+    });
+});
+// 启动本地服务
+gulp.task('serve', function (done) {
+    runSequence(
+        'html2js',
+        'modules',
+        'webpack',
+        done);
+});
 gulp.task('test', ['karma']);
 gulp.task('build', function (done) {
     runSequence(
@@ -542,7 +636,7 @@ gulp.task('build', function (done) {
         'eslint',
         'html2js',
         ['sass', 'modules'],
-        ['concat:css', 'concat:js'],
+        ['concat:js'],
         'uglify',
         'copy',
         'docs:api',
